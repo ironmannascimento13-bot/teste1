@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>CARE-X — Sistema Cognitivo</title>
+<title>CARE-X v2 — Sistema Cognitivo</title>
 <style>
 body {
   font-family: system-ui, sans-serif;
@@ -42,11 +42,12 @@ pre {
 }
 .alert { color: #ff5555; font-weight: bold; }
 .ok { color: #50fa7b; }
+.reject { color: #ffb86c; }
 </style>
 </head>
 <body>
 
-<h1>🧠 CARE-X</h1>
+<h1>🧠 CARE-X v2</h1>
 
 <section>
   <h2>🎯 Objetivo</h2>
@@ -55,9 +56,10 @@ pre {
 </section>
 
 <section>
-  <h2>💬 Entrada Externa (LLM / Humano)</h2>
-  <textarea id="externalInput" rows="4" placeholder="Cole aqui uma resposta do ChatGPT ou sua própria ideia"></textarea>
-  <button onclick="processExternal()">Processar entrada</button>
+  <h2>💬 Entrada Externa (CARE-X MODE)</h2>
+  <textarea id="externalInput" rows="6"
+    placeholder="Cole aqui a resposta do ChatGPT gerada com o prompt CARE-X"></textarea>
+  <button onclick="processExternal()">Processar transformação</button>
 </section>
 
 <section>
@@ -76,8 +78,11 @@ pre {
 </section>
 
 <script>
+/* =========================
+   Persistência
+========================= */
 let db;
-const DB_NAME = "carex_db";
+const DB_NAME = "carex_db_v2";
 
 const openDB = () => {
   const req = indexedDB.open(DB_NAME, 1);
@@ -102,51 +107,103 @@ const load = (key, cb) => {
   req.onsuccess = () => cb(req.result?.value);
 };
 
+/* =========================
+   Estado Cognitivo
+========================= */
 let state = {
   goal: "",
   hypotheses: [],
   observables: [],
   history: [],
-  stagnationScore: 0
+  stagnationScore: 0,
+  accepted: 0,
+  rejected: 0
 };
 
-const loadState = () => {
-  load("state", v => {
-    if (v) state = v;
-    render();
+/* =========================
+   Normalização Conceitual
+========================= */
+const normalize = text =>
+  text.toLowerCase()
+    .replace(/estagnar|estagnação/g, "estagnação")
+    .replace(/hipóteses|teorias|modelos/g, "hipótese")
+    .replace(/observáveis|métricas|medidas/g, "observável")
+    .replace(/redundância|repetição/g, "redundância");
+
+/* =========================
+   Vetorização Simples
+   (placeholder p/ embeddings WASM)
+========================= */
+const vectorize = text => {
+  const words = normalize(text).split(/\W+/);
+  const map = {};
+  words.forEach(w => {
+    if (!w) return;
+    map[w] = (map[w] || 0) + 1;
   });
+  return map;
 };
 
-const setGoal = () => {
-  state.goal = document.getElementById("goalInput").value;
+const cosineSimilarity = (v1, v2) => {
+  let dot = 0, n1 = 0, n2 = 0;
+  for (let k in v1) {
+    if (v2[k]) dot += v1[k] * v2[k];
+    n1 += v1[k] * v1[k];
+  }
+  for (let k in v2) n2 += v2[k] * v2[k];
+  return dot / (Math.sqrt(n1) * Math.sqrt(n2) || 1);
+};
+
+/* =========================
+   Lógica CARE-X
+========================= */
+const processExternal = () => {
+  const text = document.getElementById("externalInput").value.trim();
+  if (!text) return;
+  document.getElementById("externalInput").value = "";
+
+  const vec = vectorize(text);
+  let maxSim = 0;
+
+  for (let h of state.hypotheses) {
+    maxSim = Math.max(
+      maxSim,
+      cosineSimilarity(h.vector, vec)
+    );
+  }
+
+  let accepted = false;
+
+  if (maxSim < 0.75) {
+    state.hypotheses.push({
+      text,
+      vector: vec,
+      t: Date.now()
+    });
+    state.stagnationScore = Math.max(0, state.stagnationScore - 1);
+    state.accepted++;
+    accepted = true;
+  } else {
+    state.stagnationScore++;
+    state.rejected++;
+  }
+
+  state.history.push({
+    text,
+    similarity: maxSim,
+    accepted,
+    t: Date.now()
+  });
+
   save("state", state);
   render();
 };
 
-const similarity = (a, b) => {
-  const sa = new Set(a.toLowerCase().split(/\W+/));
-  const sb = new Set(b.toLowerCase().split(/\W+/));
-  const inter = [...sa].filter(x => sb.has(x)).length;
-  return inter / Math.max(sa.size, sb.size, 1);
-};
-
-const processExternal = () => {
-  const text = document.getElementById("externalInput").value;
-  document.getElementById("externalInput").value = "";
-
-  let maxSim = 0;
-  for (let h of state.hypotheses) {
-    maxSim = Math.max(maxSim, similarity(h.text, text));
-  }
-
-  if (maxSim > 0.92) {
-    state.stagnationScore++;
-  } else {
-    state.stagnationScore = Math.max(0, state.stagnationScore - 1);
-    state.hypotheses.push({ text, t: Date.now() });
-  }
-
-  state.history.push({ text, sim: maxSim, t: Date.now() });
+/* =========================
+   UI
+========================= */
+const setGoal = () => {
+  state.goal = document.getElementById("goalInput").value;
   save("state", state);
   render();
 };
@@ -156,13 +213,21 @@ const render = () => {
     JSON.stringify(state, null, 2);
 
   document.getElementById("metricsView").textContent =
-    `Hipóteses: ${state.hypotheses.length}
+`Hipóteses aceitas: ${state.accepted}
+Hipóteses rejeitadas: ${state.rejected}
 Estagnação: ${state.stagnationScore}`;
 
   document.getElementById("alertView").innerHTML =
     state.stagnationScore >= 3
       ? `<span class="alert">⚠ Estagnação cognitiva detectada</span>`
       : `<span class="ok">✔ Exploração produtiva</span>`;
+};
+
+const loadState = () => {
+  load("state", v => {
+    if (v) state = v;
+    render();
+  });
 };
 
 openDB();
