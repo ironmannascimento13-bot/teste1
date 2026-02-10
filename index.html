@@ -1,240 +1,172 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <title>Agente Cognitivo Local</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
-      margin: 0;
-      padding: 20px;
-    }
-    h1 { color: #38bdf8; }
-    textarea, input {
-      width: 100%;
-      padding: 8px;
-      margin-top: 5px;
-      margin-bottom: 10px;
-      background: #020617;
-      color: #e5e7eb;
-      border: 1px solid #334155;
-    }
-    button {
-      padding: 10px;
-      margin-right: 5px;
-      background: #38bdf8;
-      color: #020617;
-      border: none;
-      cursor: pointer;
-    }
-    button:disabled {
-      background: #475569;
-      cursor: not-allowed;
-    }
-    pre {
-      background: #020617;
-      padding: 10px;
-      overflow-x: auto;
-      border: 1px solid #334155;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>CARE-X — Sistema Cognitivo</title>
+<style>
+body {
+  font-family: system-ui, sans-serif;
+  background: #0f1220;
+  color: #eee;
+  margin: 0;
+  padding: 20px;
+}
+h1 { color: #8be9fd; }
+section {
+  background: #1a1d2e;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+textarea, input {
+  width: 100%;
+  background: #0f1220;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 8px;
+}
+button {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: none;
+  background: #50fa7b;
+  cursor: pointer;
+}
+pre {
+  background: #0f1220;
+  padding: 8px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.alert { color: #ff5555; font-weight: bold; }
+.ok { color: #50fa7b; }
+</style>
 </head>
 <body>
 
-<h1>🧠 Agente Cognitivo Local</h1>
+<h1>🧠 CARE-X</h1>
 
-<label>API Key (fica só no seu navegador)</label>
-<input type="password" id="apiKeyInput" placeholder="sk-..." />
+<section>
+  <h2>🎯 Objetivo</h2>
+  <input id="goalInput" placeholder="Defina o problema"/>
+  <button onclick="setGoal()">Salvar objetivo</button>
+</section>
 
-<label>Objetivo</label>
-<textarea id="goalInput"></textarea>
+<section>
+  <h2>💬 Entrada Externa (LLM / Humano)</h2>
+  <textarea id="externalInput" rows="4" placeholder="Cole aqui uma resposta do ChatGPT ou sua própria ideia"></textarea>
+  <button onclick="processExternal()">Processar entrada</button>
+</section>
 
-<label>Nova hipótese (humana)</label>
-<textarea id="hypothesisInput"></textarea>
-<button onclick="saveHypothesis()">Salvar hipótese</button>
+<section>
+  <h2>📈 Métricas Cognitivas</h2>
+  <pre id="metricsView"></pre>
+</section>
 
-<hr>
+<section>
+  <h2>🧠 Memória Estrutural</h2>
+  <pre id="memoryView"></pre>
+</section>
 
-<button id="askBtn" onclick="askLLM()">Pedir ajuda cognitiva</button>
-
-<h3>📚 Memória local</h3>
-<pre id="memoryView"></pre>
+<section>
+  <h2>🚨 Estado do Sistema</h2>
+  <div id="alertView"></div>
+</section>
 
 <script>
-/* =========================
-   ESTADO E MEMÓRIA
-========================= */
+let db;
+const DB_NAME = "carex_db";
 
-let busy = false;
-
-const defaultMemory = {
-  goal: "",
-  hypotheses: [],
-  negative_memory: [],
-  log: []
+const openDB = () => {
+  const req = indexedDB.open(DB_NAME, 1);
+  req.onupgradeneeded = e => {
+    db = e.target.result;
+    db.createObjectStore("state", { keyPath: "key" });
+  };
+  req.onsuccess = e => {
+    db = e.target.result;
+    loadState();
+  };
 };
 
-let memory = JSON.parse(localStorage.getItem("memory")) || defaultMemory;
+const save = (key, value) => {
+  const tx = db.transaction("state", "readwrite");
+  tx.objectStore("state").put({ key, value });
+};
 
-/* =========================
-   UTILIDADES
-========================= */
+const load = (key, cb) => {
+  const tx = db.transaction("state", "readonly");
+  const req = tx.objectStore("state").get(key);
+  req.onsuccess = () => cb(req.result?.value);
+};
 
-function saveMemory() {
-  localStorage.setItem("memory", JSON.stringify(memory, null, 2));
-  renderMemory();
-}
+let state = {
+  goal: "",
+  hypotheses: [],
+  observables: [],
+  history: [],
+  stagnationScore: 0
+};
 
-function renderMemory() {
-  document.getElementById("memoryView").textContent =
-    JSON.stringify(memory, null, 2);
-}
-
-function normalize(text) {
-  return text
-    .toLowerCase()
-    .replace(/[^\w\s]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isRedundant(text) {
-  const n = normalize(text);
-  return memory.hypotheses.some(h => normalize(h.text) === n);
-}
-
-/* =========================
-   AÇÕES HUMANAS
-========================= */
-
-function saveHypothesis() {
-  const text = document.getElementById("hypothesisInput").value.trim();
-  if (!text) return;
-
-  if (isRedundant(text)) {
-    memory.log.push("Hipótese humana redundante — descartada");
-    saveMemory();
-    return;
-  }
-
-  memory.hypotheses.push({
-    text,
-    timestamp: new Date().toISOString(),
-    source: "human"
+const loadState = () => {
+  load("state", v => {
+    if (v) state = v;
+    render();
   });
+};
 
-  memory.log.push("Hipótese humana adicionada");
-  document.getElementById("hypothesisInput").value = "";
-  saveMemory();
-}
+const setGoal = () => {
+  state.goal = document.getElementById("goalInput").value;
+  save("state", state);
+  render();
+};
 
-document.getElementById("apiKeyInput").addEventListener("change", e => {
-  localStorage.setItem("apiKey", e.target.value.trim());
-});
+const similarity = (a, b) => {
+  const sa = new Set(a.toLowerCase().split(/\W+/));
+  const sb = new Set(b.toLowerCase().split(/\W+/));
+  const inter = [...sa].filter(x => sb.has(x)).length;
+  return inter / Math.max(sa.size, sb.size, 1);
+};
 
-document.getElementById("goalInput").addEventListener("change", e => {
-  memory.goal = e.target.value.trim();
-  saveMemory();
-});
+const processExternal = () => {
+  const text = document.getElementById("externalInput").value;
+  document.getElementById("externalInput").value = "";
 
-/* =========================
-   CHAMADA AO LLM
-========================= */
-
-async function askLLM() {
-  if (busy) return;
-  busy = true;
-  document.getElementById("askBtn").disabled = true;
-
-  try {
-    const apiKey = localStorage.getItem("apiKey");
-    if (!apiKey) {
-      alert("API Key ausente");
-      return;
-    }
-
-    if (!memory.goal || memory.hypotheses.length === 0) {
-      alert("Defina objetivo e pelo menos uma hipótese");
-      return;
-    }
-
-    memory.log.push("Chamando LLM");
-    saveMemory();
-
-    const prompt = `
-Objetivo:
-${memory.goal}
-
-Hipóteses existentes:
-${memory.hypotheses.map(h => "- " + h.text).join("\n")}
-
-Gere UMA nova hipótese:
-- estruturalmente diferente
-- não redundante
-- que reduza espaço de busca
-- curta e clara
-`;
-
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + apiKey
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7
-      })
-    });
-
-    if (!res.ok) {
-      memory.log.push("Erro HTTP: " + res.status);
-      saveMemory();
-      return;
-    }
-
-    const data = await res.json();
-    const text = data.choices[0].message.content.trim();
-
-    if (isRedundant(text)) {
-      memory.log.push("Hipótese do LLM redundante — descartada");
-      saveMemory();
-      return;
-    }
-
-    memory.hypotheses.push({
-      text,
-      timestamp: new Date().toISOString(),
-      source: "LLM"
-    });
-
-    memory.log.push("Hipótese do LLM adicionada");
-    saveMemory();
-
-  } catch (err) {
-    memory.log.push("Erro: " + err.message);
-    saveMemory();
-  } finally {
-    busy = false;
-    document.getElementById("askBtn").disabled = false;
+  let maxSim = 0;
+  for (let h of state.hypotheses) {
+    maxSim = Math.max(maxSim, similarity(h.text, text));
   }
-}
 
-/* =========================
-   INIT
-========================= */
+  if (maxSim > 0.92) {
+    state.stagnationScore++;
+  } else {
+    state.stagnationScore = Math.max(0, state.stagnationScore - 1);
+    state.hypotheses.push({ text, t: Date.now() });
+  }
 
-document.getElementById("apiKeyInput").value =
-  localStorage.getItem("apiKey") || "";
+  state.history.push({ text, sim: maxSim, t: Date.now() });
+  save("state", state);
+  render();
+};
 
-document.getElementById("goalInput").value = memory.goal || "";
+const render = () => {
+  document.getElementById("memoryView").textContent =
+    JSON.stringify(state, null, 2);
 
-renderMemory();
+  document.getElementById("metricsView").textContent =
+    `Hipóteses: ${state.hypotheses.length}
+Estagnação: ${state.stagnationScore}`;
+
+  document.getElementById("alertView").innerHTML =
+    state.stagnationScore >= 3
+      ? `<span class="alert">⚠ Estagnação cognitiva detectada</span>`
+      : `<span class="ok">✔ Exploração produtiva</span>`;
+};
+
+openDB();
 </script>
 
 </body>
 </html>
-   
