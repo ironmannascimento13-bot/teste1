@@ -3,125 +3,181 @@
 <head>
   <meta charset="UTF-8" />
   <title>Agente Cognitivo Local</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-
   <style>
     body {
-      font-family: system-ui, sans-serif;
+      font-family: Arial, sans-serif;
       background: #0f172a;
       color: #e5e7eb;
       margin: 0;
-      padding: 16px;
+      padding: 20px;
     }
-    h1 { font-size: 1.2rem; }
-    textarea, input, button {
+    h1 { color: #38bdf8; }
+    textarea, input {
       width: 100%;
-      margin-top: 8px;
-      padding: 10px;
-      border-radius: 8px;
-      border: none;
-      font-size: 1rem;
-    }
-    textarea {
-      min-height: 100px;
+      padding: 8px;
+      margin-top: 5px;
+      margin-bottom: 10px;
+      background: #020617;
+      color: #e5e7eb;
+      border: 1px solid #334155;
     }
     button {
-      background: #2563eb;
-      color: white;
-      font-weight: bold;
+      padding: 10px;
+      margin-right: 5px;
+      background: #38bdf8;
+      color: #020617;
+      border: none;
+      cursor: pointer;
     }
-    .box {
-      background: #020617;
-      padding: 12px;
-      border-radius: 10px;
-      margin-top: 12px;
+    button:disabled {
+      background: #475569;
+      cursor: not-allowed;
     }
     pre {
-      white-space: pre-wrap;
-      font-size: 0.9rem;
+      background: #020617;
+      padding: 10px;
+      overflow-x: auto;
+      border: 1px solid #334155;
     }
   </style>
 </head>
-
 <body>
 
 <h1>🧠 Agente Cognitivo Local</h1>
 
-<div class="box">
-  <label>🔑 API Key (fica só no seu navegador)</label>
-  <input id="apiKey" type="password" placeholder="sk-..." />
-</div>
+<label>API Key (fica só no seu navegador)</label>
+<input type="password" id="apiKeyInput" placeholder="sk-..." />
 
-<div class="box">
-  <label>🎯 Objetivo atual</label>
-  <textarea id="goal"></textarea>
-</div>
+<label>Objetivo</label>
+<textarea id="goalInput"></textarea>
 
-<div class="box">
-  <label>🧪 Hipótese nova</label>
-  <textarea id="hypothesis"></textarea>
-  <button onclick="saveHypothesis()">Salvar hipótese</button>
-</div>
+<label>Nova hipótese (humana)</label>
+<textarea id="hypothesisInput"></textarea>
+<button onclick="saveHypothesis()">Salvar hipótese</button>
 
-<div class="box">
-  <label>🤖 Pedir ajuda cognitiva (LLM)</label>
-  <button onclick="askLLM()">Gerar hipótese não redundante</button>
-</div>
+<hr>
 
-<div class="box">
-  <h3>📚 Memória local</h3>
-  <pre id="memoryView"></pre>
-</div>
+<button id="askBtn" onclick="askLLM()">Pedir ajuda cognitiva</button>
+
+<h3>📚 Memória local</h3>
+<pre id="memoryView"></pre>
 
 <script>
-  const memory = JSON.parse(localStorage.getItem("agent_memory")) || {
-    goal: "",
-    hypotheses: [],
-    negative_memory: [],
-    log: []
-  };
+/* =========================
+   ESTADO E MEMÓRIA
+========================= */
 
-  document.getElementById("goal").value = memory.goal;
-  render();
+let busy = false;
 
-  function saveHypothesis() {
-    const h = document.getElementById("hypothesis").value.trim();
-    if (!h) return;
-    memory.hypotheses.push({
-      text: h,
-      timestamp: new Date().toISOString()
-    });
-    memory.log.push("Hipótese adicionada");
-    persist();
+const defaultMemory = {
+  goal: "",
+  hypotheses: [],
+  negative_memory: [],
+  log: []
+};
+
+let memory = JSON.parse(localStorage.getItem("memory")) || defaultMemory;
+
+/* =========================
+   UTILIDADES
+========================= */
+
+function saveMemory() {
+  localStorage.setItem("memory", JSON.stringify(memory, null, 2));
+  renderMemory();
+}
+
+function renderMemory() {
+  document.getElementById("memoryView").textContent =
+    JSON.stringify(memory, null, 2);
+}
+
+function normalize(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isRedundant(text) {
+  const n = normalize(text);
+  return memory.hypotheses.some(h => normalize(h.text) === n);
+}
+
+/* =========================
+   AÇÕES HUMANAS
+========================= */
+
+function saveHypothesis() {
+  const text = document.getElementById("hypothesisInput").value.trim();
+  if (!text) return;
+
+  if (isRedundant(text)) {
+    memory.log.push("Hipótese humana redundante — descartada");
+    saveMemory();
+    return;
   }
 
-  async function askLLM() {
-    const apiKey = document.getElementById("apiKey").value.trim();
+  memory.hypotheses.push({
+    text,
+    timestamp: new Date().toISOString(),
+    source: "human"
+  });
+
+  memory.log.push("Hipótese humana adicionada");
+  document.getElementById("hypothesisInput").value = "";
+  saveMemory();
+}
+
+document.getElementById("apiKeyInput").addEventListener("change", e => {
+  localStorage.setItem("apiKey", e.target.value.trim());
+});
+
+document.getElementById("goalInput").addEventListener("change", e => {
+  memory.goal = e.target.value.trim();
+  saveMemory();
+});
+
+/* =========================
+   CHAMADA AO LLM
+========================= */
+
+async function askLLM() {
+  if (busy) return;
+  busy = true;
+  document.getElementById("askBtn").disabled = true;
+
+  try {
+    const apiKey = localStorage.getItem("apiKey");
     if (!apiKey) {
-      alert("Coloca a API key primeiro.");
+      alert("API Key ausente");
       return;
     }
 
+    if (!memory.goal || memory.hypotheses.length === 0) {
+      alert("Defina objetivo e pelo menos uma hipótese");
+      return;
+    }
+
+    memory.log.push("Chamando LLM");
+    saveMemory();
+
     const prompt = `
-Você é um operador cognitivo.
-Objetivo: ${memory.goal}
+Objetivo:
+${memory.goal}
 
 Hipóteses existentes:
 ${memory.hypotheses.map(h => "- " + h.text).join("\n")}
 
-Tarefa:
-Gere NO MÁXIMO 1 hipótese nova que:
-- Não seja redundante
-- Tenha critério de falsificação claro
-- Seja estruturalmente distinta
-
-Responda apenas com a hipótese.
+Gere UMA nova hipótese:
+- estruturalmente diferente
+- não redundante
+- que reduza espaço de busca
+- curta e clara
 `;
 
-    memory.log.push("Chamando LLM");
-    persist();
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -130,12 +186,24 @@ Responda apenas com a hipótese.
       body: JSON.stringify({
         model: "gpt-4.1-mini",
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.4
+        temperature: 0.7
       })
     });
 
-    const data = await response.json();
-    const text = data.choices[0].message.content;
+    if (!res.ok) {
+      memory.log.push("Erro HTTP: " + res.status);
+      saveMemory();
+      return;
+    }
+
+    const data = await res.json();
+    const text = data.choices[0].message.content.trim();
+
+    if (isRedundant(text)) {
+      memory.log.push("Hipótese do LLM redundante — descartada");
+      saveMemory();
+      return;
+    }
 
     memory.hypotheses.push({
       text,
@@ -143,22 +211,30 @@ Responda apenas com a hipótese.
       source: "LLM"
     });
 
-    memory.log.push("Hipótese recebida do LLM");
-    persist();
-  }
+    memory.log.push("Hipótese do LLM adicionada");
+    saveMemory();
 
-  function persist() {
-    memory.goal = document.getElementById("goal").value;
-    localStorage.setItem("agent_memory", JSON.stringify(memory, null, 2));
-    document.getElementById("hypothesis").value = "";
-    render();
+  } catch (err) {
+    memory.log.push("Erro: " + err.message);
+    saveMemory();
+  } finally {
+    busy = false;
+    document.getElementById("askBtn").disabled = false;
   }
+}
 
-  function render() {
-    document.getElementById("memoryView").textContent =
-      JSON.stringify(memory, null, 2);
-  }
+/* =========================
+   INIT
+========================= */
+
+document.getElementById("apiKeyInput").value =
+  localStorage.getItem("apiKey") || "";
+
+document.getElementById("goalInput").value = memory.goal || "";
+
+renderMemory();
 </script>
 
 </body>
 </html>
+   
