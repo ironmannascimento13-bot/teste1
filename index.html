@@ -1,237 +1,141 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8">
-<title>CARE-X v2 — Sistema Cognitivo</title>
-<style>
-body {
-  font-family: system-ui, sans-serif;
-  background: #0f1220;
-  color: #eee;
-  margin: 0;
-  padding: 20px;
-}
-h1 { color: #8be9fd; }
-section {
-  background: #1a1d2e;
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-}
-textarea, input {
-  width: 100%;
-  background: #0f1220;
-  color: #eee;
-  border: 1px solid #444;
-  border-radius: 8px;
-  padding: 8px;
-}
-button {
-  margin-top: 8px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  border: none;
-  background: #50fa7b;
-  cursor: pointer;
-}
-pre {
-  background: #0f1220;
-  padding: 8px;
-  border-radius: 8px;
-  overflow-x: auto;
-}
-.alert { color: #ff5555; font-weight: bold; }
-.ok { color: #50fa7b; }
-.reject { color: #ffb86c; }
-</style>
-</head>
-<body>
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
 
-<h1>🧠 CARE-X v2</h1>
+# ----------------------------------
+# 1) BAIXA DADOS
+# ----------------------------------
+start = "2024-01-01"
+end   = "2026-02-28"
 
-<section>
-  <h2>🎯 Objetivo</h2>
-  <input id="goalInput" placeholder="Defina o problema"/>
-  <button onclick="setGoal()">Salvar objetivo</button>
-</section>
+# PETR4
+petr = yf.download("PETR4.SA", start=start, end=end)
 
-<section>
-  <h2>💬 Entrada Externa (CARE-X MODE)</h2>
-  <textarea id="externalInput" rows="6"
-    placeholder="Cole aqui a resposta do ChatGPT gerada com o prompt CARE-X"></textarea>
-  <button onclick="processExternal()">Processar transformação</button>
-</section>
+# Brent (futuro) – ticker do Yahoo Finance
+brent = yf.download("BZ=F", start=start, end=end)
 
-<section>
-  <h2>📈 Métricas Cognitivas</h2>
-  <pre id="metricsView"></pre>
-</section>
+# IBOV
+ibov = yf.download("^BVSP", start=start, end=end)
 
-<section>
-  <h2>🧠 Memória Estrutural</h2>
-  <pre id="memoryView"></pre>
-</section>
+# USD/BRL do Yahoo
+fx = yf.download("USDBRL=X", start=start, end=end)
 
-<section>
-  <h2>🚨 Estado do Sistema</h2>
-  <div id="alertView"></div>
-</section>
+# Ajuste de preços
+df = pd.DataFrame({
+    "PETR4": petr["Adj Close"],
+    "Brent": brent["Close"],
+    "IBOV": ibov["Adj Close"],
+    "USD/BRL": fx["Close"]
+})
 
-<script>
-/* =========================
-   Persistência
-========================= */
-let db;
-const DB_NAME = "carex_db_v2";
+df.dropna(inplace=True)
 
-const openDB = () => {
-  const req = indexedDB.open(DB_NAME, 1);
-  req.onupgradeneeded = e => {
-    db = e.target.result;
-    db.createObjectStore("state", { keyPath: "key" });
-  };
-  req.onsuccess = e => {
-    db = e.target.result;
-    loadState();
-  };
-};
+# ----------------------------------
+# 2) RETORNOS
+# ----------------------------------
+df["r_PETR4"] = np.log(df["PETR4"] / df["PETR4"].shift(1))
+df["r_Brent"] = np.log(df["Brent"] / df["Brent"].shift(1))
+df["r_IBOV"]  = np.log(df["IBOV"] / df["IBOV"].shift(1))
+df["r_FX"]    = np.log(df["USD/BRL"] / df["USD/BRL"].shift(1))
 
-const save = (key, value) => {
-  const tx = db.transaction("state", "readwrite");
-  tx.objectStore("state").put({ key, value });
-};
+df.dropna(inplace=True)
 
-const load = (key, cb) => {
-  const tx = db.transaction("state", "readonly");
-  const req = tx.objectStore("state").get(key);
-  req.onsuccess = () => cb(req.result?.value);
-};
+# ----------------------------------
+# 3) BETAS EWLS (decay 0.96)
+# ----------------------------------
+decay = 0.96
 
-/* =========================
-   Estado Cognitivo
-========================= */
-let state = {
-  goal: "",
-  hypotheses: [],
-  observables: [],
-  history: [],
-  stagnationScore: 0,
-  accepted: 0,
-  rejected: 0
-};
+# Weights (exponencial)
+def ewls_weights(n):
+    w = decay ** np.arange(n)[::-1]
+    return w / w.sum()
 
-/* =========================
-   Normalização Conceitual
-========================= */
-const normalize = text =>
-  text.toLowerCase()
-    .replace(/estagnar|estagnação/g, "estagnação")
-    .replace(/hipóteses|teorias|modelos/g, "hipótese")
-    .replace(/observáveis|métricas|medidas/g, "observável")
-    .replace(/redundância|repetição/g, "redundância");
+# Função EWLS beta
+def ewls_beta(y, x):
+    w = ewls_weights(len(y))
+    X = sm.add_constant(x)
+    model = sm.WLS(y, X, weights=w).fit()
+    return model.params
 
-/* =========================
-   Vetorização Simples
-   (placeholder p/ embeddings WASM)
-========================= */
-const vectorize = text => {
-  const words = normalize(text).split(/\W+/);
-  const map = {};
-  words.forEach(w => {
-    if (!w) return;
-    map[w] = (map[w] || 0) + 1;
-  });
-  return map;
-};
+# Inicializa betas
+df["beta_oil"] = np.nan
+df["beta_ibov"] = np.nan
+df["beta_fx"] = np.nan
 
-const cosineSimilarity = (v1, v2) => {
-  let dot = 0, n1 = 0, n2 = 0;
-  for (let k in v1) {
-    if (v2[k]) dot += v1[k] * v2[k];
-    n1 += v1[k] * v1[k];
-  }
-  for (let k in v2) n2 += v2[k] * v2[k];
-  return dot / (Math.sqrt(n1) * Math.sqrt(n2) || 1);
-};
+window = 60
 
-/* =========================
-   Lógica CARE-X
-========================= */
-const processExternal = () => {
-  const text = document.getElementById("externalInput").value.trim();
-  if (!text) return;
-  document.getElementById("externalInput").value = "";
+for i in range(window, len(df)):
+    y = df["r_PETR4"].iloc[i-window:i]
+    X1 = df["r_Brent"].iloc[i-window:i]
+    X2 = df["r_IBOV"].iloc[i-window:i]
+    X3 = df["r_FX"].iloc[i-window:i]
+    params = ewls_beta(y, pd.concat([X1, X2, X3], axis=1))
+    df.loc[df.index[i], ["beta_oil","beta_ibov","beta_fx"]] = params[1:]
 
-  const vec = vectorize(text);
-  let maxSim = 0;
+# Residual narrativo
+df["u_t"] = df["r_PETR4"] - (df["beta_oil"]*df["r_Brent"] + df["beta_ibov"]*df["r_IBOV"] + df["beta_fx"]*df["r_FX"])
+df.dropna(inplace=True)
 
-  for (let h of state.hypotheses) {
-    maxSim = Math.max(
-      maxSim,
-      cosineSimilarity(h.vector, vec)
-    );
-  }
+# ----------------------------------
+# 4) EVENTOS (lista exemplo)
+# ----------------------------------
+# Substitua pelas datas reais e buckets que você já organizou
+events = pd.DataFrame([
+    {"date":"2025-05-12","type":"dividendo"},
+    {"date":"2025-08-07","type":"dividendo"},
+    {"date":"2025-11-06","type":"dividendo"},
+    {"date":"2024-11-21","type":"plano"},
+    {"date":"2025-11-28","type":"plano"},
+    {"date":"2024-05-10","type":"politico"},
+], dtype=str)
 
-  let accepted = false;
+events["date"] = pd.to_datetime(events["date"])
 
-  if (maxSim < 0.75) {
-    state.hypotheses.push({
-      text,
-      vector: vec,
-      t: Date.now()
-    });
-    state.stagnationScore = Math.max(0, state.stagnationScore - 1);
-    state.accepted++;
-    accepted = true;
-  } else {
-    state.stagnationScore++;
-    state.rejected++;
-  }
+# Calcula Shock/Drift
+records = []
+for _, row in events.iterrows():
+    t0 = row["date"]
+    if t0 in df.index:
+        shock = df["u_t"].loc[t0 - pd.Timedelta("1D"):t0 + pd.Timedelta("1D")].mean()
+        drift = df["u_t"].loc[t0 + pd.Timedelta("1D"):t0 + pd.Timedelta("10D")].sum()
+        records.append({"date":t0, "type":row["type"], "shock":shock, "drift":drift})
 
-  state.history.push({
-    text,
-    similarity: maxSim,
-    accepted,
-    t: Date.now()
-  });
+evt_df = pd.DataFrame(records)
 
-  save("state", state);
-  render();
-};
+# ----------------------------------
+# 5) REGRESSÃO θ
+# ----------------------------------
+print("\nθ por tipo de evento:")
+for t in evt_df["type"].unique():
+    sub = evt_df[evt_df["type"]==t]
+    if len(sub)>=3:
+        X = sm.add_constant(sub["shock"])
+        y = sub["drift"]
+        r = sm.OLS(y, X).fit()
+        print(f"Tipo {t} — θ (coef shock): {r.params['shock']:.4f}")
 
-/* =========================
-   UI
-========================= */
-const setGoal = () => {
-  state.goal = document.getElementById("goalInput").value;
-  save("state", state);
-  render();
-};
+# ----------------------------------
+# 6) GRÁFICOS
+# ----------------------------------
+plt.figure(figsize=(12,6))
 
-const render = () => {
-  document.getElementById("memoryView").textContent =
-    JSON.stringify(state, null, 2);
+# (a) Preço PETR4
+plt.subplot(2,1,1)
+plt.plot(df["PETR4"], label="PETR4")
+plt.title("PETR4 – Preço Ajustado")
+plt.legend()
 
-  document.getElementById("metricsView").textContent =
-`Hipóteses aceitas: ${state.accepted}
-Hipóteses rejeitadas: ${state.rejected}
-Estagnação: ${state.stagnationScore}`;
+# (b) Residual narrativo u_t
+plt.subplot(2,1,2)
+plt.plot(df["u_t"], label="Residual narrativo")
+plt.axhline(0, color="black", linestyle="--")
+plt.title("Residual narrativo (u_t)")
+plt.legend()
 
-  document.getElementById("alertView").innerHTML =
-    state.stagnationScore >= 3
-      ? `<span class="alert">⚠ Estagnação cognitiva detectada</span>`
-      : `<span class="ok">✔ Exploração produtiva</span>`;
-};
+plt.tight_layout()
+plt.show()
 
-const loadState = () => {
-  load("state", v => {
-    if (v) state = v;
-    render();
-  });
-};
-
-openDB();
-</script>
-
-</body>
-</html>
+print("\nEventos Shock/Drift:")
+print(evt_df)
