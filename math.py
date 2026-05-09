@@ -1,3 +1,6 @@
+import sys
+!{sys.executable} -m pip install pyvis requests networkx
+
 """
 math_graph_crawler.py
 ─────────────────────
@@ -87,7 +90,7 @@ CONFIG = {
         r"Turkish|Ukrainian|Venezuelan|Vietnamese)",
     ],
 
-    # Categorias temáticas para colorir nós (regex aplicado ao título)
+# Categorias temáticas para colorir nós (regex aplicado ao título)
     "topic_colors": {
         "Algebra":        ("#4f9cf9", ["algebra", "group", "ring", "field", "polynomial",
                                        "galois", "linear", "vector", "module", "lattice"]),
@@ -254,7 +257,6 @@ def crawl(start: str, max_depth: int, max_nodes: int,
     print(f"\n✅ Crawl concluído — {len(G.nodes)} nós, {len(G.edges)} arestas.\n")
     return G, meta
 
-
 # ─── MÉTRICAS DE CENTRALIDADE ──────────────────────────────────────────────────
 
 def compute_centrality(G: nx.DiGraph) -> dict[str, float]:
@@ -280,7 +282,7 @@ def build_html(G: nx.DiGraph, meta: dict, centrality: dict, output: str) -> None
         font_color="#e2e8f0",
         directed=True,
         notebook=False,
-        cdn_resources="inline",    # HTML autocontido, sem dependência de CDN
+        cdn_resources="in_line",    # HTML autocontido, sem dependência de CDN
     )
 
     # ── Física do grafo ───────────────────────────────────────────────────────
@@ -327,55 +329,6 @@ def build_html(G: nx.DiGraph, meta: dict, centrality: dict, output: str) -> None
       }
     }
     """)
-
-    # ── Adiciona nós ──────────────────────────────────────────────────────────
-    topic_colors = {t: c for t, (c, _) in CONFIG["topic_colors"].items()}
-
-    for node in G.nodes():
-        m       = meta.get(node, {})
-        topic   = m.get("topic", "Mathematics")
-        color   = topic_colors.get(topic, "#e2e8f0")
-        rank    = centrality.get(node, 0.1)
-        size    = 10 + rank * 35          # nós centrais são maiores
-
-        # Tooltip rico em HTML
-        tooltip = (
-            f"<div style='font-family:IBM Plex Mono,monospace;"
-            f"background:#1e2433;padding:10px 14px;border-radius:6px;"
-            f"border:1px solid {color};max-width:280px;line-height:1.5'>"
-            f"<b style='color:{color};font-size:13px'>{node}</b><br>"
-            f"<span style='color:#94a3b8;font-size:10px'>📂 {topic}</span><br><br>"
-            f"<span style='color:#cbd5e1;font-size:11px'>"
-            f"{m.get('summary', '')[:220]}…</span>"
-            f"</div>"
-        )
-
-        net.add_node(
-            node,
-            label=node,
-            title=tooltip,
-            size=size,
-            color={
-                "background": color,
-                "border":     color,
-                "highlight":  {"background": "#ffffff", "border": color},
-                "hover":      {"background": color,    "border": "#ffffff"},
-            },
-            url=m.get("url", ""),          # acessível via JavaScript customizado
-        )
-
-    # ── Adiciona arestas ──────────────────────────────────────────────────────
-    for src, dst in G.edges():
-        net.add_edge(src, dst)
-
-    # ── Gera HTML base e injeta melhorias ────────────────────────────────────
-    raw_html = net.generate_html()
-    enhanced = _inject_enhancements(raw_html, G, meta, topic_colors)
-
-    with open(output, "w", encoding="utf-8") as f:
-        f.write(enhanced)
-
-    print(f"🎨 Grafo salvo em '{output}'")
 
 
 # ─── INJEÇÃO DE MELHORIAS NO HTML ─────────────────────────────────────────────
@@ -462,8 +415,7 @@ def _inject_enhancements(html: str, G: nx.DiGraph, meta: dict,
     font-size: 11px; color: #4a5568;
     white-space: nowrap;
   }}
-
-  /* ── Painel lateral ── */
+/* ── Painel lateral ── */
   #side-panel {{
     position: fixed; top: 54px; right: 0;
     width: 300px; height: calc(100vh - 54px);
@@ -520,7 +472,7 @@ def _inject_enhancements(html: str, G: nx.DiGraph, meta: dict,
   }}
   #panel-close:hover {{ color: #e2e8f0; }}
 
-  /* ── Legenda ── */
+ /* ── Legenda ── */
   #legend {{
     position: fixed; bottom: 20px; left: 20px;
     background: rgba(13,17,23,0.92);
@@ -570,4 +522,169 @@ def _inject_enhancements(html: str, G: nx.DiGraph, meta: dict,
   <h1>∑ Math Knowledge Graph <span>/ Wikipedia</span></h1>
   <input id="search-box" type="text" placeholder="buscar nó…" autocomplete="off">
   <span id="stats">
-    
+    {len(G.nodes())} nodes · {len(G.edges())} edges
+  </span>
+</div>
+
+<!-- PAINEL LATERAL -->
+<div id="side-panel">
+  <button id="panel-close" onclick="closePanel()">×</button>
+  <div id="panel-topic"></div>
+  <div id="panel-title">Selecione um nó</div>
+  <div id="panel-summary"></div>
+  <div id="panel-degree"></div>
+  <a id="panel-link" href="#" target="_blank" rel="noopener">
+    Abrir na Wikipedia ↗
+  </a>
+</div>
+
+<!-- LEGENDA -->
+<div id="legend">
+  <h3>Tópicos</h3>
+  {legend_items}
+</div>
+
+<!-- HINT -->
+<div id="hint">
+  scroll: zoom<br>
+  drag: mover<br>
+  click: detalhes
+</div>
+
+<script>
+// ── Dados embutidos ────────────────────────────────────────────────────────
+const NODE_DATA = {json.dumps(node_data, ensure_ascii=False)};
+
+const TOPIC_COLORS = {json.dumps(topic_colors)};
+
+
+// ── Painel ─────────────────────────────────────────────────────────────────
+function openPanel(nodeId) {{
+  const d = NODE_DATA[nodeId];
+  if (!d) return;
+  const color = TOPIC_COLORS[d.topic] || '#e2e8f0';
+  document.getElementById('panel-topic').style.color  = color;
+  document.getElementById('panel-topic').textContent  = d.topic;
+  document.getElementById('panel-title').textContent  = nodeId;
+  document.getElementById('panel-summary').textContent = d.summary || 'Sem descrição.';
+  document.getElementById('panel-degree').textContent =
+    `Links recebidos: ${{d.degree}}`;
+  const lnk = document.getElementById('panel-link');
+  lnk.href = d.url || '#';
+  lnk.style.borderColor = color;
+  lnk.style.color = color;
+  document.getElementById('side-panel').classList.add('open');
+}}
+
+function closePanel() {{
+  document.getElementById('side-panel').classList.remove('open');
+}}
+
+// ── Conecta evento de clique do Pyvis ──────────────────────────────────────
+// Pyvis expõe a instância vis.Network como `network` no escopo global.
+// Aguardamos o objeto estar disponível.
+function hookNetworkEvents() {{
+  if (typeof network === 'undefined') {{
+    setTimeout(hookNetworkEvents, 200);
+    return;
+  }}
+  network.on('click', function(params) {{
+    if (params.nodes.length > 0) {{
+      openPanel(params.nodes[0]);
+    }}
+  }});
+  network.on('doubleClick', function(params) {{
+    if (params.nodes.length > 0) {{
+      const d = NODE_DATA[params.nodes[0]];
+      if (d && d.url) window.open(d.url, '_blank');
+    }}
+  }});
+}}
+
+document.addEventListener('DOMContentLoaded', hookNetworkEvents);
+
+
+// ── Busca de nó ────────────────────────────────────────────────────────────
+document.getElementById('search-box').addEventListener('input', function() {{
+  const q = this.value.trim().toLowerCase();
+  if (!q || typeof network === 'undefined') return;
+
+  const match = Object.keys(NODE_DATA).find(n => n.toLowerCase().includes(q));
+  if (match) {{
+    const positions = network.getPositions([match]);
+    if (positions[match]) {{
+      network.moveTo({
+        position: positions[match],
+        scale: 1.6,
+        animation: {{ duration: 600, easingFunction: 'easeInOutQuad' }},
+      });
+      network.selectNodes([match]);
+      openPanel(match);
+    }}
+  }}
+}});
+</script>
+<!-- ═══════ END ENHANCEMENTS ═══════ -->
+"""
+
+    # Injeta antes de </body>
+    if "</body>" in html:
+        html = html.replace("</body>", injection + "\n</body>")
+    else:
+        html += injection
+
+    return html
+
+# ─── PONTO DE ENTRADA ──────────────────────────────────────────────────────────
+
+def main() -> None:
+    cfg = CONFIG
+
+    # 1. Crawl BFS
+    G, meta = crawl(
+        start        = cfg["start_page"],
+        max_depth    = cfg["max_depth"],
+        max_nodes    = cfg["max_nodes"],
+        links_per_page = cfg["links_per_page"],
+        delay         = cfg["request_delay"],
+    )
+
+    # 2. Remove nós sem metadado (nunca foram visitados como fonte)
+    #    — mantém somente nós com pelo menos 1 aresta
+    isolates = list(nx.isolates(G))
+    if isolates:
+        print(f"  ℹ Removendo {len(isolates)} nós isolados.")
+        G.remove_nodes_from(isolates)
+
+    # 3. Preenche metadados faltantes com sumário rápido
+    for node in list(G.nodes()):
+        if node not in meta:
+            time.sleep(cfg["request_delay"])
+            summ = wiki_summary(node)
+            meta[node] = {
+                "summary": summ.get("extract", "")[:400],
+                "url":     summ.get("content_urls", {}).get("desktop", {}).get(
+                               "page", BASE_URL + node.replace(" ", "_")),
+                "topic":   classify_node(node, summ.get("extract", "")),
+            }
+            G.nodes[node]["topic"] = meta[node]["topic"]
+
+    # 4. Centralidade
+    centrality = compute_centrality(G)
+
+    # 5. Visualização
+    build_html(G, meta, centrality, cfg["output_file"])
+
+    # 6. Estatísticas finais
+    print("\n── Estatísticas ─────────────────────────────────────")
+    print(f"  Nós:    {len(G.nodes())}")
+    print(f"  Arestas:{len(G.edges())}")
+    top5 = sorted(centrality.items(), key=lambda x: -x[1])[:5]
+    print("  Top-5 por PageRank:")
+    for name, score in top5:
+        print(f"    • {name:40s}  {score:.3f}")
+    print(f"\n  → Abra '{cfg['output_file']}' no seu browser.\n")
+
+
+if __name__ == "__main__":
+    main()
